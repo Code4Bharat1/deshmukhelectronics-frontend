@@ -3,29 +3,36 @@ import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import {
   QrCode, Package, ArrowRight, CheckCircle, XCircle,
-  AlertTriangle, ChevronLeft, Plus, Minus, Camera, Type
+  AlertTriangle, ChevronLeft, Plus, Minus, Camera, Type,
+  RotateCcw, ArrowDownToLine, ArrowUpFromLine, ArrowLeftRight,
+  Building, User, RefreshCw, Zap
 } from 'lucide-react';
 import { productsApi, stockApi, warehousesApi, suppliersApi, customersApi, returnsApi } from '@/lib/api';
 import { toast } from '@/components/ui/Toast';
+import useAuthStore from '@/lib/authStore';
 
-const STEPS = ['Scan', 'Identify', 'Action', 'Quantity', 'Confirm'];
 const ACTIONS = [
-  { value: 'incoming', label: 'Incoming', color: 'bg-emerald-50 border-emerald-500 text-emerald-700', icon: '📥' },
-  { value: 'outgoing', label: 'Outgoing', color: 'bg-orange-50 border-orange-500 text-orange-700', icon: '📤' },
-  { value: 'transfer', label: 'Transfer', color: 'bg-blue-50 border-blue-500 text-blue-700', icon: '🔄' },
-  { value: 'return', label: 'Return', color: 'bg-purple-50 border-purple-500 text-purple-700', icon: '↩️' },
-  { value: 'damaged', label: 'Damaged', color: 'bg-red-50 border-red-500 text-red-700', icon: '⚠️' },
+  { value: 'outgoing', label: 'Outgoing', icon: ArrowUpFromLine, color: 'bg-orange-600 text-white shadow-sm', activeBorder: 'border-orange-500' },
+  { value: 'incoming', label: 'Incoming', icon: ArrowDownToLine, color: 'bg-emerald-600 text-white shadow-sm', activeBorder: 'border-emerald-500' },
+  { value: 'transfer', label: 'Transfer', icon: ArrowLeftRight, color: 'bg-blue-600 text-white shadow-sm', activeBorder: 'border-blue-500' },
+  { value: 'return', label: 'Return', icon: RotateCcw, color: 'bg-purple-600 text-white shadow-sm', activeBorder: 'border-purple-500' },
+  { value: 'damaged', label: 'Damaged', icon: AlertTriangle, color: 'bg-red-600 text-white shadow-sm', activeBorder: 'border-red-500' },
 ];
 
-function ScanPageInner() {
+function QuickScanPageInner() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [step, setStep] = useState(0); // 0=Scan 1=Identify 2=Action 3=Qty 4=Confirm
-  const [manualEntry, setManualEntry] = useState(false);
-  const [sku, setSku] = useState('');
+  const { user } = useAuthStore();
+
+  // State
+  const [manualMode, setManualMode] = useState(false);
+  const [skuSearch, setSkuSearch] = useState('');
+  const [allProducts, setAllProducts] = useState([]);
   const [product, setProduct] = useState(null);
-  const [action, setAction] = useState(searchParams.get('action') || '');
+  const [action, setAction] = useState(searchParams.get('action') || 'outgoing');
   const [quantity, setQuantity] = useState(1);
+
+  // Locations / Parties
   const [warehouses, setWarehouses] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [customers, setCustomers] = useState([]);
@@ -35,30 +42,37 @@ function ScanPageInner() {
   const [selectedSupplier, setSelectedSupplier] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState('');
   const [reason, setReason] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
+
+  // UI state
+  const [submitting, setSubmitting] = useState(false);
   const [stockError, setStockError] = useState('');
+  const [lastSuccess, setLastSuccess] = useState(null);
+
   const scannerRef = useRef(null);
   const html5QrCodeRef = useRef(null);
 
   useEffect(() => {
-    // Load supporting data
     const fetchData = async () => {
       try {
-        const [whRes, supRes, custRes] = await Promise.all([
+        const [prodRes, whRes, supRes, custRes] = await Promise.all([
+          productsApi.getAll({ limit: 100 }),
           warehousesApi.getAll(),
-          suppliersApi.getAll(),
-          customersApi.getAll(),
+          suppliersApi.getAll({ limit: 100 }),
+          customersApi.getAll({ limit: 100 }),
         ]);
-        setWarehouses(whRes.data.data || []);
+        setAllProducts(prodRes.data.data || []);
+        const whs = whRes.data.data || [];
+        setWarehouses(whs);
         setSuppliers(supRes.data.data || []);
         setCustomers(custRes.data.data || []);
-        if ((whRes.data.data || []).length > 0) {
-          setSelectedWarehouse(whRes.data.data[0]._id);
-          setSelectedFrom(whRes.data.data[0]._id);
-          setSelectedTo(whRes.data.data.length > 1 ? whRes.data.data[1]._id : whRes.data.data[0]._id);
-        }
-      } catch {}
+
+        const defaultWh = user?.assignedWarehouse?._id || user?.assignedWarehouse || (whs.length > 0 ? whs[0]._id : '');
+        setSelectedWarehouse(defaultWh);
+        setSelectedFrom(defaultWh);
+        setSelectedTo(whs.length > 1 ? (whs[0]._id === defaultWh ? whs[1]._id : whs[0]._id) : defaultWh);
+      } catch (err) {
+        console.error('Failed to load scan options:', err);
+      }
     };
     fetchData();
 
@@ -68,13 +82,13 @@ function ScanPageInner() {
   }, []);
 
   useEffect(() => {
-    if (step === 0 && !manualEntry && typeof window !== 'undefined') {
+    if (!manualMode && !product && typeof window !== 'undefined') {
       startScanner();
     }
     return () => {
       stopScanner();
     };
-  }, [step, manualEntry]);
+  }, [manualMode, product]);
 
   const startScanner = async () => {
     try {
@@ -82,7 +96,7 @@ function ScanPageInner() {
       if (scannerRef.current && !html5QrCodeRef.current) {
         html5QrCodeRef.current = new Html5QrcodeScanner(
           'qr-reader',
-          { fps: 10, qrbox: { width: 250, height: 250 }, aspectRatio: 1.0 },
+          { fps: 10, qrbox: { width: 220, height: 220 }, aspectRatio: 1.0 },
           false
         );
         html5QrCodeRef.current.render(
@@ -92,7 +106,7 @@ function ScanPageInner() {
       }
     } catch (err) {
       console.error('Scanner init error:', err);
-      setManualEntry(true);
+      setManualMode(true);
     }
   };
 
@@ -105,41 +119,92 @@ function ScanPageInner() {
 
   const handleScanSuccess = async (text) => {
     stopScanner();
-    const extractedSKU = text.replace('DESHMUKH-', '').trim();
-    await lookupProduct(extractedSKU);
+    const cleanSku = text.replace('DESHMUKH-', '').trim();
+    lookupProduct(cleanSku);
   };
 
-  const lookupProduct = async (skuValue) => {
-    setLoading(true);
+  const lookupProduct = async (skuOrId) => {
+    setStockError('');
     try {
-      const res = await productsApi.getBySKU(skuValue || sku);
-      setProduct(res.data.data);
-      setStep(1);
+      // Find from loaded list or call API
+      const found = allProducts.find(
+        (p) => p.sku?.toUpperCase() === skuOrId?.toUpperCase() || p._id === skuOrId
+      );
+      if (found) {
+        setProduct(found);
+        setQuantity(1);
+        toast(`Identified: ${found.name}`, 'success');
+        return;
+      }
+
+      const res = await productsApi.getBySKU(skuOrId);
+      if (res.data.data) {
+        setProduct(res.data.data);
+        setQuantity(1);
+        toast(`Identified: ${res.data.data.name}`, 'success');
+      } else {
+        toast('Product not found for this code', 'error');
+      }
     } catch {
-      toast('Product not found for this SKU/QR', 'error');
-    } finally {
-      setLoading(false);
+      toast('Product not found. Please select from list.', 'error');
     }
   };
 
-  const handleConfirm = async () => {
-    if (!product || !action || quantity <= 0) return;
+  const handleManualSelect = (e) => {
+    const pId = e.target.value;
+    setSkuSearch(pId);
+    if (!pId) {
+      setProduct(null);
+      return;
+    }
+    const found = allProducts.find((p) => p._id === pId);
+    if (found) {
+      setProduct(found);
+      setQuantity(1);
+    }
+  };
+
+  const handleResetForNext = () => {
+    setProduct(null);
+    setSkuSearch('');
+    setQuantity(1);
     setStockError('');
-    setLoading(true);
+    setLastSuccess(null);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!product) {
+      toast('Please scan or select a product first', 'error');
+      return;
+    }
+    if (quantity <= 0) {
+      toast('Quantity must be greater than 0', 'error');
+      return;
+    }
+
+    if (action === 'outgoing' && quantity > (product.currentStock || 0)) {
+      setStockError(`Insufficient stock! Available in stock: ${product.currentStock} ${product.unit}`);
+      toast('Insufficient stock', 'error');
+      return;
+    }
+
+    setSubmitting(true);
+    setStockError('');
 
     try {
       if (action === 'incoming') {
         await stockApi.createIncoming({
           productId: product._id,
           warehouseId: selectedWarehouse,
-          quantity,
+          quantity: Number(quantity),
           supplierId: selectedSupplier || undefined,
         });
       } else if (action === 'outgoing') {
         await stockApi.createOutgoing({
           productId: product._id,
           warehouseId: selectedWarehouse,
-          quantity,
+          quantity: Number(quantity),
           customerId: selectedCustomer || undefined,
         });
       } else if (action === 'transfer') {
@@ -147,387 +212,432 @@ function ScanPageInner() {
           productId: product._id,
           fromWarehouseId: selectedFrom,
           toWarehouseId: selectedTo,
-          quantity,
+          quantity: Number(quantity),
         });
       } else if (action === 'damaged') {
         await stockApi.createDamaged({
           productId: product._id,
           warehouseId: selectedWarehouse,
-          quantity,
-          reason: reason || 'Damage reported',
+          quantity: Number(quantity),
+          reason: reason || 'Reported damaged via QR Scan',
         });
       } else if (action === 'return') {
         await returnsApi.create({
           productId: product._id,
           warehouseId: selectedWarehouse,
-          quantity,
+          quantity: Number(quantity),
           customerId: selectedCustomer || undefined,
-          reason: reason || 'Return',
+          reason: reason || 'Customer Return',
           disposition: 'restock',
         });
       }
-      setSuccess(true);
-      setStep(4);
+
+      setLastSuccess({
+        productName: product.name,
+        quantity,
+        unit: product.unit || 'pcs',
+        action,
+        time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      });
+
+      toast(`Successfully recorded ${action} movement!`, 'success');
+      
+      // Update local product stock in list
+      setAllProducts((prev) =>
+        prev.map((p) => {
+          if (p._id === product._id) {
+            const diff = action === 'incoming' || action === 'return' ? Number(quantity) : -Number(quantity);
+            return { ...p, currentStock: Math.max(0, (p.currentStock || 0) + diff) };
+          }
+          return p;
+        })
+      );
+      setProduct((prev) => {
+        if (!prev) return null;
+        const diff = action === 'incoming' || action === 'return' ? Number(quantity) : -Number(quantity);
+        return { ...prev, currentStock: Math.max(0, (prev.currentStock || 0) + diff) };
+      });
+
     } catch (err) {
-      const msg = err.response?.data?.message || 'Failed to record movement';
+      const msg = err.response?.data?.message || 'Failed to record stock movement';
       setStockError(msg);
       toast(msg, 'error');
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
-  const reset = () => {
-    setStep(0); setProduct(null); setAction(''); setQuantity(1);
-    setSku(''); setManualEntry(false); setSuccess(false); setStockError('');
-  };
+  const currentAction = ACTIONS.find((a) => a.value === action) || ACTIONS[0];
+  const isOutgoing = action === 'outgoing';
+  const isStockLow = isOutgoing && product && quantity > (product.currentStock || 0);
 
-  // Step 0: Scan
-  if (step === 0) {
-    return (
-      <div className="max-w-md mx-auto space-y-5 animate-fade-in">
-        <ProgressBar current={0} total={5} />
-        <h1 className="text-xl font-bold text-gray-900">Scan QR Code</h1>
+  return (
+    <div className="max-w-md mx-auto space-y-4 animate-fade-in pb-12">
+      {/* Top Header */}
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => router.push('/worker')}
+          className="btn-ghost btn-icon p-2 -ml-2 text-gray-500 hover:text-gray-800"
+          title="Back"
+        >
+          <ChevronLeft className="w-5 h-5" />
+        </button>
+        <div className="text-center flex-1">
+          <h1 className="text-lg font-bold text-gray-900 flex items-center justify-center gap-1.5">
+            <Zap className="w-4 h-4 text-amber-500 fill-amber-500" />
+            Quick Stock Scan
+          </h1>
+          <p className="text-[11px] text-gray-400">All-in-one 1-step stock entry</p>
+        </div>
+        <button
+          onClick={() => {
+            stopScanner();
+            setManualMode(!manualMode);
+          }}
+          className="text-xs font-semibold text-brand-700 bg-brand-50 px-2.5 py-1 rounded-lg border border-brand-200"
+        >
+          {manualMode ? '📷 Camera' : '⌨️ Search'}
+        </button>
+      </div>
 
-        {!manualEntry ? (
-          <div className="card p-0 overflow-hidden">
-            <div id="qr-reader" ref={scannerRef} className="w-full" />
+      {/* Success Notification Banner */}
+      {lastSuccess && (
+        <div className="p-3.5 bg-emerald-50 border-2 border-emerald-300 rounded-2xl flex items-center justify-between gap-3 shadow-sm animate-scale-up">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center text-sm font-bold">
+              ✓
+            </div>
+            <div>
+              <div className="text-xs font-bold text-emerald-950 capitalize">
+                {lastSuccess.action} Recorded: {lastSuccess.quantity} {lastSuccess.unit}
+              </div>
+              <div className="text-[11px] text-emerald-700 truncate max-w-[200px]">
+                {lastSuccess.productName} ({lastSuccess.time})
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={handleResetForNext}
+            className="btn-primary text-xs py-1.5 px-2.5 bg-emerald-700 hover:bg-emerald-800 shrink-0"
+          >
+            Scan Next ⚡
+          </button>
+        </div>
+      )}
+
+      {/* 1. Camera / Manual Product Selector */}
+      <div className="card p-3 space-y-3">
+        {!product ? (
+          <div>
+            {!manualMode ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <span className="font-semibold flex items-center gap-1">
+                    <Camera className="w-3.5 h-3.5 text-brand-600" /> Point Camera at QR Code
+                  </span>
+                  <span className="text-[10px] text-gray-400">Auto-detects</span>
+                </div>
+                <div className="overflow-hidden rounded-xl bg-black border border-gray-200">
+                  <div id="qr-reader" ref={scannerRef} className="w-full" />
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-gray-700 flex items-center gap-1">
+                  <Package className="w-3.5 h-3.5 text-brand-600" /> Select Product
+                </label>
+                <select
+                  value={skuSearch}
+                  onChange={handleManualSelect}
+                  className="input w-full text-xs font-medium"
+                >
+                  <option value="">-- Choose or Search Product --</option>
+                  {allProducts.map((p) => (
+                    <option key={p._id} value={p._id}>
+                      {p.name} ({p.sku}) — Stock: {p.currentStock} {p.unit}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
         ) : (
-          <div className="card space-y-4">
-            <h2 className="font-bold text-gray-800">Manual SKU Entry</h2>
-            <input
-              type="text"
-              className="input"
-              placeholder="Enter SKU (e.g. WIRE-4MM-100)"
-              value={sku}
-              onChange={(e) => setSku(e.target.value.toUpperCase())}
-              autoFocus
-            />
+          /* Identified Product Header Card */
+          <div className="flex items-center justify-between p-3 bg-brand-50/70 border border-brand-200 rounded-xl">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-brand-600 text-white flex items-center justify-center font-bold text-lg shrink-0">
+                📦
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-bold text-gray-900 truncate">{product.name}</div>
+                <div className="text-xs text-gray-500">
+                  SKU: <span className="font-mono font-semibold">{product.sku}</span> ·{' '}
+                  <span className="text-emerald-700 font-bold">
+                    Stock: {product.currentStock} {product.unit || 'pcs'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
             <button
-              className="btn-primary w-full"
-              onClick={() => lookupProduct(sku)}
-              disabled={!sku.trim() || loading}
+              type="button"
+              onClick={handleResetForNext}
+              className="text-xs text-gray-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-white"
+              title="Rescan"
             >
-              {loading ? 'Searching...' : 'Find Product'}
+              <RefreshCw className="w-4 h-4" />
             </button>
           </div>
         )}
-
-        <div className="flex gap-3">
-          <button
-            className="flex-1 btn-secondary flex items-center gap-2 justify-center"
-            onClick={() => { stopScanner(); setManualEntry(!manualEntry); }}
-          >
-            {manualEntry ? <Camera className="w-4 h-4" /> : <Type className="w-4 h-4" />}
-            {manualEntry ? 'Use Camera' : 'Manual Entry'}
-          </button>
-          <button className="btn-ghost" onClick={() => router.back()}>
-            <ChevronLeft className="w-4 h-4" /> Back
-          </button>
-        </div>
       </div>
-    );
-  }
 
-  // Step 1: Identify Product
-  if (step === 1) {
-    return (
-      <div className="max-w-md mx-auto space-y-5 animate-fade-in">
-        <ProgressBar current={1} total={5} />
-        <h1 className="text-xl font-bold text-gray-900">Product Found</h1>
-        <div className="card">
-          <div className="flex items-center gap-4 mb-4">
-            <div className="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center text-3xl overflow-hidden">
-              {product?.imageUrl ? (
-                <img src={`http://localhost:5000${product.imageUrl}`} alt={product.name} className="w-full h-full object-cover" />
-              ) : '📦'}
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-gray-900">{product?.name}</h2>
-              <p className="text-gray-500 text-sm">SKU: {product?.sku}</p>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="bg-gray-50 rounded-xl p-3">
-              <div className="text-xs text-gray-500 mb-0.5">Current Stock</div>
-              <div className="text-xl font-bold text-gray-900">{product?.currentStock?.toLocaleString('en-IN')}</div>
-              <div className="text-xs text-gray-400">{product?.unit}</div>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-3">
-              <div className="text-xs text-gray-500 mb-0.5">Category</div>
-              <div className="text-sm font-semibold text-gray-700">{product?.category}</div>
-              <div className="text-xs text-gray-400">{product?.brand}</div>
-            </div>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {/* 2. Action Selector (Fast Pills) */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+            Select Operation
+          </label>
+          <div className="grid grid-cols-5 gap-1.5">
+            {ACTIONS.map((a) => {
+              const isSelected = action === a.value;
+              return (
+                <button
+                  key={a.value}
+                  type="button"
+                  onClick={() => setAction(a.value)}
+                  className={`flex flex-col items-center justify-center p-2 rounded-xl border text-[11px] font-semibold transition-all ${
+                    isSelected
+                      ? `${a.color} scale-[1.02] ring-2 ring-brand-700 border-transparent`
+                      : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  <a.icon className="w-4 h-4 mb-0.5" />
+                  <span>{a.label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
-        <div className="flex gap-3">
-          <button className="btn-secondary flex-1" onClick={() => { setStep(0); setProduct(null); }}>
-            ← Rescan
-          </button>
-          <button className="btn-primary flex-1" onClick={() => action ? setStep(2) : setStep(2)}>
-            Yes, continue →
-          </button>
-        </div>
-      </div>
-    );
-  }
 
-  // Step 2: Select Action
-  if (step === 2) {
-    return (
-      <div className="max-w-md mx-auto space-y-5 animate-fade-in">
-        <ProgressBar current={2} total={5} />
-        <h1 className="text-xl font-bold text-gray-900">Select Action</h1>
-        <div className="space-y-3">
-          {ACTIONS.map((a) => (
+        {/* 3. Quantity Stepper */}
+        <div className="card p-4 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+              Quantity to {currentAction.label}
+            </label>
+            {product && (
+              <span className="text-xs text-gray-500 font-medium">
+                Available: <strong className="text-gray-900">{product.currentStock} {product.unit}</strong>
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center justify-center gap-3">
             <button
-              key={a.value}
-              className={`w-full flex items-center gap-4 p-4 rounded-2xl border-2 transition-all duration-150 ${
-                action === a.value ? a.color + ' ring-2 ring-offset-1' : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
-              }`}
-              onClick={() => { setAction(a.value); setStep(3); }}
-            >
-              <span className="text-2xl">{a.icon}</span>
-              <span className="font-bold text-base">{a.label}</span>
-              <ChevronRight className="w-4 h-4 ml-auto opacity-50" />
-            </button>
-          ))}
-        </div>
-        <button className="btn-secondary w-full" onClick={() => setStep(1)}>← Back</button>
-      </div>
-    );
-  }
-
-  // Step 3: Enter Quantity
-  if (step === 3) {
-    const actionObj = ACTIONS.find((a) => a.value === action);
-    const needsReason = action === 'damaged' || action === 'return';
-    const isOutgoing = action === 'outgoing';
-    const stockWarning = isOutgoing && quantity > (product?.currentStock || 0);
-
-    return (
-      <div className="max-w-md mx-auto space-y-5 animate-fade-in">
-        <ProgressBar current={3} total={5} />
-        <h1 className="text-xl font-bold text-gray-900">Enter Details</h1>
-
-        {/* Quantity Stepper */}
-        <div className="card">
-          <div className="text-sm font-semibold text-gray-600 mb-3">Quantity ({product?.unit})</div>
-          <div className="flex items-center gap-4 justify-center">
-            <button
-              className="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center hover:bg-gray-200 transition-colors text-2xl"
+              type="button"
               onClick={() => setQuantity(Math.max(1, quantity - 1))}
+              className="w-12 h-12 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-lg active:scale-95 transition-all"
             >
-              <Minus className="w-5 h-5" />
+              <Minus className="w-5 h-5 text-gray-700" />
             </button>
+
             <input
               type="number"
               min="1"
               value={quantity}
               onChange={(e) => setQuantity(Math.max(1, Number(e.target.value)))}
-              className="text-3xl font-bold text-center w-28 border-b-2 border-brand-700 bg-transparent focus:outline-none"
+              className="text-2xl font-black text-center w-24 py-1.5 border-b-2 border-brand-700 bg-transparent focus:outline-none"
+              required
             />
+
             <button
-              className="w-14 h-14 rounded-2xl bg-brand-100 flex items-center justify-center hover:bg-brand-200 transition-colors text-brand-700"
+              type="button"
               onClick={() => setQuantity(quantity + 1)}
+              className="w-12 h-12 rounded-xl bg-brand-100 hover:bg-brand-200 text-brand-800 flex items-center justify-center text-lg active:scale-95 transition-all"
             >
               <Plus className="w-5 h-5" />
             </button>
           </div>
-          {isOutgoing && (
-            <div className={`mt-3 text-sm text-center ${stockWarning ? 'text-red-600 font-bold' : 'text-gray-400'}`}>
-              Available: {product?.currentStock?.toLocaleString('en-IN')} {product?.unit}
-              {stockWarning && ' ⚠️ Insufficient stock!'}
+
+          {/* Quick Preset Buttons */}
+          <div className="flex items-center justify-center gap-2 pt-1">
+            {[5, 10, 25, 50].map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setQuantity(n)}
+                className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-gray-100 text-gray-600 hover:bg-gray-200"
+              >
+                +{n}
+              </button>
+            ))}
+            {product?.currentStock > 0 && isOutgoing && (
+              <button
+                type="button"
+                onClick={() => setQuantity(product.currentStock)}
+                className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800 hover:bg-orange-200"
+              >
+                Max ({product.currentStock})
+              </button>
+            )}
+          </div>
+
+          {isStockLow && (
+            <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs font-bold text-center">
+              ⚠️ Warning: Quantity exceeds available warehouse stock!
             </div>
           )}
         </div>
 
-        {/* Warehouse / Party selectors */}
-        {(action === 'incoming' || action === 'outgoing' || action === 'damaged') && (
-          <div className="card space-y-3">
-            <div className="form-group">
-              <label className="label">Warehouse</label>
-              <select className="input select" value={selectedWarehouse} onChange={(e) => setSelectedWarehouse(e.target.value)}>
-                {warehouses.map((w) => <option key={w._id} value={w._id}>{w.name}</option>)}
-              </select>
-            </div>
-            {action === 'incoming' && (
-              <div className="form-group">
-                <label className="label">Supplier (optional)</label>
-                <select className="input select" value={selectedSupplier} onChange={(e) => setSelectedSupplier(e.target.value)}>
-                  <option value="">— Select Supplier —</option>
-                  {suppliers.map((s) => <option key={s._id} value={s._id}>{s.name}</option>)}
+        {/* 4. Warehouse & Party Context Fields */}
+        <div className="card p-3.5 space-y-3">
+          {action === 'transfer' ? (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-gray-600">From Warehouse</label>
+                <select
+                  value={selectedFrom}
+                  onChange={(e) => setSelectedFrom(e.target.value)}
+                  className="input w-full text-xs py-1.5"
+                  required
+                >
+                  {warehouses.map((w) => (
+                    <option key={w._id} value={w._id}>{w.name}</option>
+                  ))}
                 </select>
               </div>
-            )}
-            {action === 'outgoing' && (
-              <div className="form-group">
-                <label className="label">Customer (optional)</label>
-                <select className="input select" value={selectedCustomer} onChange={(e) => setSelectedCustomer(e.target.value)}>
-                  <option value="">— Select Customer —</option>
-                  {customers.map((c) => <option key={c._id} value={c._id}>{c.name}</option>)}
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-gray-600">To Warehouse</label>
+                <select
+                  value={selectedTo}
+                  onChange={(e) => setSelectedTo(e.target.value)}
+                  className="input w-full text-xs py-1.5"
+                  required
+                >
+                  {warehouses.filter((w) => w._id !== selectedFrom).map((w) => (
+                    <option key={w._id} value={w._id}>{w.name}</option>
+                  ))}
                 </select>
               </div>
-            )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-gray-600">Warehouse</label>
+                <select
+                  value={selectedWarehouse}
+                  onChange={(e) => setSelectedWarehouse(e.target.value)}
+                  className="input w-full text-xs py-1.5"
+                  required
+                >
+                  {warehouses.map((w) => (
+                    <option key={w._id} value={w._id}>{w.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {action === 'incoming' && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-gray-600">Supplier (Optional)</label>
+                  <select
+                    value={selectedSupplier}
+                    onChange={(e) => setSelectedSupplier(e.target.value)}
+                    className="input w-full text-xs py-1.5"
+                  >
+                    <option value="">-- Direct --</option>
+                    {suppliers.map((s) => (
+                      <option key={s._id} value={s._id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {action === 'outgoing' && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-gray-600">Customer (Optional)</label>
+                  <select
+                    value={selectedCustomer}
+                    onChange={(e) => setSelectedCustomer(e.target.value)}
+                    className="input w-full text-xs py-1.5"
+                  >
+                    <option value="">-- Walk-in / Order --</option>
+                    {customers.map((c) => (
+                      <option key={c._id} value={c._id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {(action === 'damaged' || action === 'return') && (
+            <div className="space-y-1 pt-1 border-t border-gray-100">
+              <label className="text-[11px] font-semibold text-gray-600">Reason / Notes</label>
+              <input
+                type="text"
+                placeholder={action === 'damaged' ? 'e.g. Broken seal, water damage' : 'e.g. Excess return from site'}
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="input w-full text-xs py-1.5"
+                required
+              />
+            </div>
+          )}
+        </div>
+
+        {stockError && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{stockError}</span>
           </div>
         )}
 
-        {action === 'transfer' && (
-          <div className="card space-y-3">
-            <div className="form-group">
-              <label className="label">From Warehouse</label>
-              <select className="input select" value={selectedFrom} onChange={(e) => setSelectedFrom(e.target.value)}>
-                {warehouses.map((w) => <option key={w._id} value={w._id}>{w.name}</option>)}
-              </select>
-            </div>
-            <div className="form-group">
-              <label className="label">To Warehouse</label>
-              <select className="input select" value={selectedTo} onChange={(e) => setSelectedTo(e.target.value)}>
-                {warehouses.filter((w) => w._id !== selectedFrom).map((w) => <option key={w._id} value={w._id}>{w.name}</option>)}
-              </select>
-            </div>
-          </div>
-        )}
-
-        {needsReason && (
-          <div className="card">
-            <div className="form-group">
-              <label className="label">Reason</label>
-              <input type="text" className="input" placeholder="Enter reason..." value={reason} onChange={(e) => setReason(e.target.value)} />
-            </div>
-          </div>
-        )}
-
-        <div className="flex gap-3">
-          <button className="btn-secondary flex-1" onClick={() => setStep(2)}>← Back</button>
-          <button
-            className="btn-primary flex-1"
-            onClick={() => setStep(4)}
-            disabled={stockWarning || quantity <= 0}
-          >
-            Review →
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Step 4: Confirm (or Success)
-  if (success) {
-    return (
-      <div className="max-w-md mx-auto flex flex-col items-center gap-6 py-16 animate-fade-in text-center">
-        <div className="w-24 h-24 rounded-full bg-emerald-100 flex items-center justify-center animate-pulse-soft">
-          <CheckCircle className="w-12 h-12 text-emerald-600" />
-        </div>
-        <div>
-          <h2 className="text-2xl font-bold text-gray-900">Done! 🎉</h2>
-          <p className="text-gray-500 mt-1">Movement recorded successfully</p>
-        </div>
-        <div className="bg-gray-50 rounded-2xl p-4 w-full text-left space-y-2">
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">Product</span>
-            <span className="font-semibold">{product?.name}</span>
-          </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">Action</span>
-            <span className="font-semibold capitalize">{action}</span>
-          </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-gray-500">Quantity</span>
-            <span className="font-semibold">{quantity} {product?.unit}</span>
-          </div>
-        </div>
-        <div className="flex gap-3 w-full">
-          <button className="btn-secondary flex-1" onClick={reset}>Scan Another</button>
-          <button className="btn-primary flex-1" onClick={() => router.push('/worker')}>Back to Home</button>
-        </div>
-      </div>
-    );
-  }
-
-  // Confirm step
-  const actionObj = ACTIONS.find((a) => a.value === action);
-  return (
-    <div className="max-w-md mx-auto space-y-5 animate-fade-in">
-      <ProgressBar current={4} total={5} />
-      <h1 className="text-xl font-bold text-gray-900">Confirm Action</h1>
-
-      {stockError && (
-        <div className="flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-2xl">
-          <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-          <div>
-            <div className="font-bold text-red-800 text-sm">Action Blocked</div>
-            <div className="text-red-700 text-sm">{stockError}</div>
-          </div>
-        </div>
-      )}
-
-      <div className="card space-y-3">
-        <div className="flex items-center gap-3 mb-4">
-          <span className="text-3xl">{actionObj?.icon}</span>
-          <span className="text-lg font-bold text-gray-900 capitalize">{action}</span>
-        </div>
-        {[
-          ['Product', product?.name],
-          ['SKU', product?.sku],
-          ['Quantity', `${quantity} ${product?.unit}`],
-          ['Current Stock', `${product?.currentStock} ${product?.unit}`],
-          action === 'transfer' ? ['From → To', `${warehouses.find(w=>w._id===selectedFrom)?.name} → ${warehouses.find(w=>w._id===selectedTo)?.name}`] : null,
-          (action === 'incoming' || action === 'outgoing' || action === 'damaged') ? ['Warehouse', warehouses.find(w=>w._id===selectedWarehouse)?.name] : null,
-          reason ? ['Reason', reason] : null,
-        ].filter(Boolean).map(([k, v]) => (
-          <div key={k} className="flex justify-between items-center text-sm py-1 border-b border-gray-50 last:border-0">
-            <span className="text-gray-500">{k}</span>
-            <span className="font-semibold text-gray-900 text-right max-w-[60%] truncate">{v || '—'}</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex gap-3">
-        <button className="btn-secondary flex-1" onClick={() => setStep(3)} disabled={loading}>← Edit</button>
+        {/* 5. Big 1-Click Submit Button */}
         <button
-          className="btn-primary flex-1 btn-lg"
-          onClick={handleConfirm}
-          disabled={loading}
+          type="submit"
+          disabled={!product || isStockLow || submitting}
+          className={`w-full py-3.5 px-4 rounded-2xl text-white font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-md active:scale-98 ${
+            !product
+              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              : isStockLow
+              ? 'bg-red-400 cursor-not-allowed'
+              : action === 'outgoing'
+              ? 'bg-orange-600 hover:bg-orange-700'
+              : action === 'incoming'
+              ? 'bg-emerald-600 hover:bg-emerald-700'
+              : action === 'transfer'
+              ? 'bg-blue-600 hover:bg-blue-700'
+              : action === 'return'
+              ? 'bg-purple-600 hover:bg-purple-700'
+              : 'bg-red-600 hover:bg-red-700'
+          }`}
         >
-          {loading ? (
-            <span className="flex items-center gap-2">
+          {submitting ? (
+            <>
               <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Processing...
-            </span>
-          ) : '✓ Confirm'}
+              <span>Saving Movement...</span>
+            </>
+          ) : (
+            <>
+              <CheckCircle className="w-5 h-5" />
+              <span>
+                {product
+                  ? `Record ${currentAction.label} (${quantity} ${product.unit || 'pcs'})`
+                  : 'Scan or Select Product First'}
+              </span>
+            </>
+          )}
         </button>
-      </div>
+      </form>
     </div>
   );
 }
 
-function ProgressBar({ current, total }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex justify-between text-xs text-gray-400">
-        <span>Step {current + 1} of {total}</span>
-        <span>{STEPS[current]}</span>
-      </div>
-      <div className="flex gap-1.5">
-        {STEPS.map((_, i) => (
-          <div
-            key={i}
-            className={`flex-1 h-1.5 rounded-full transition-all duration-300 ${
-              i <= current ? 'bg-brand-700' : 'bg-gray-200'
-            }`}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-export default function ScanPage() {
+export default function QuickScanPage() {
   return (
     <Suspense fallback={<div className="flex items-center justify-center py-16"><div className="w-8 h-8 border-2 border-brand-700 border-t-transparent rounded-full animate-spin" /></div>}>
-      <ScanPageInner />
+      <QuickScanPageInner />
     </Suspense>
   );
 }
