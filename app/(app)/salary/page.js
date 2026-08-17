@@ -262,9 +262,11 @@ export default function SalaryPage() {
     <div className="space-y-5 animate-fade-in">
       <div className="page-header">
         <div>
-          <h1 className="page-title">Salary Slips & Payroll</h1>
+          <h1 className="page-title">{isAdmin ? 'Salary Slips & Payroll' : 'My Salary Slips & Records'}</h1>
           <p className="text-gray-500 text-sm">
-            Automatic shift shortfall deduction, paid/unpaid leaves, and overtime calculation
+            {isAdmin
+              ? 'Automatic shift shortfall deduction, paid/unpaid leaves, and overtime calculation'
+              : 'Your monthly salary statements, attendance shift records, and itemized payslips'}
           </p>
         </div>
         {isAdmin && (

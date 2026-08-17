@@ -5,14 +5,17 @@ import {
   LayoutDashboard, Package, QrCode, ArrowDownToLine, ArrowUpFromLine,
   ArrowLeftRight, Warehouse, Settings2, AlertTriangle, RotateCcw,
   ClipboardList, Users, Truck, UserCheck, BanknoteIcon, BarChart2,
-  Bell, ShieldCheck, LogOut, Zap, ChevronRight, UserCircle, Receipt
+  Bell, ShieldCheck, LogOut, Zap, ChevronRight, UserCircle, Receipt, Target
 } from 'lucide-react';
 import useAuthStore from '../../lib/authStore';
 import { useRouter } from 'next/navigation';
 import { cn } from '../../lib/utils';
+import { useState, useEffect } from 'react';
+import { goalsApi } from '../../lib/api';
 
 const adminNavItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, section: 'main' },
+  { href: '/goals', label: 'Timeline & Goals', icon: Target, section: 'main' },
   { href: '/products', label: 'Products', icon: Package, section: 'inventory' },
   { href: '/qr-codes', label: 'QR Codes', icon: QrCode, section: 'inventory' },
   { href: '/stock/incoming', label: 'Incoming', icon: ArrowDownToLine, section: 'inventory' },
@@ -48,15 +51,29 @@ export default function Sidebar({ onClose }) {
   const pathname = usePathname();
   const { user, logout } = useAuthStore();
   const router = useRouter();
+  const [urgentGoalsCount, setUrgentGoalsCount] = useState(0);
+
+  useEffect(() => {
+    if (!user) return;
+    const checkAlerts = async () => {
+      try {
+        const res = await goalsApi.getAlerts();
+        setUrgentGoalsCount(res.data.count || 0);
+      } catch {}
+    };
+    checkAlerts();
+    const interval = setInterval(checkAlerts, 20000);
+    return () => clearInterval(interval);
+  }, [user]);
 
   const navItems =
     user?.role === 'owner_admin' ? adminNavItems
     : user?.role === 'manager' ? managerNavItems
     : user?.role === 'accountant'
-      ? adminNavItems.filter((i) => ['/dashboard', '/reports', '/salary', '/suppliers', '/customers', '/notifications'].some(p => i.href === p))
+      ? adminNavItems.filter((i) => ['/dashboard', '/goals', '/reports', '/salary', '/suppliers', '/customers', '/notifications'].some(p => i.href === p))
     : user?.role === 'supervisor'
       ? adminNavItems.filter((i) => !['qr-codes', 'users'].some((x) => i.href.includes(x)))
-    : [];
+    : adminNavItems.filter((i) => ['/dashboard', '/goals', '/attendance', '/salary', '/notifications'].some(p => i.href === p));
 
   const handleLogout = () => {
     logout();
@@ -104,10 +121,17 @@ export default function Sidebar({ onClose }) {
                   key={item.href}
                   href={item.href}
                   onClick={onClose}
-                  className={cn('sidebar-link', isActive && 'active')}
+                  className={cn('sidebar-link flex items-center justify-between', isActive && 'active')}
                 >
-                  <item.icon className="link-icon" />
-                  <span>{item.label}</span>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <item.icon className="link-icon shrink-0" />
+                    <span className="truncate">{item.label}</span>
+                  </div>
+                  {item.href === '/goals' && urgentGoalsCount > 0 && (
+                    <span className="bg-red-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full animate-pulse shrink-0">
+                      {urgentGoalsCount}
+                    </span>
+                  )}
                 </Link>
               );
             })}

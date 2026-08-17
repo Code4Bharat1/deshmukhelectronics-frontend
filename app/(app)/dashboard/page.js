@@ -3,15 +3,17 @@ import { useState, useEffect } from 'react';
 import {
   Package, TrendingUp, TrendingDown, ArrowDownToLine, ArrowUpFromLine,
   AlertTriangle, Wrench, Clock, Warehouse, CheckCircle, XCircle,
-  RefreshCw, MoreVertical
+  RefreshCw, MoreVertical, Target, Flame, Plus, ChevronRight, Truck
 } from 'lucide-react';
+import Link from 'next/link';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Area, AreaChart
 } from 'recharts';
-import { dashboardApi, stockApi } from '../../../lib/api';
+import { dashboardApi, stockApi, goalsApi } from '../../../lib/api';
 import KPICard from '../../../components/ui/KPICard';
 import StatusBadge from '../../../components/ui/StatusBadge';
+import AssignGoalModal from '../../../components/goals/AssignGoalModal';
 import { formatCurrency, formatDateTime, getMovementIcon } from '../../../lib/utils';
 
 const TEAL_COLORS = ['#0b6e7d', '#0d9488', '#14b8a6', '#2dd4bf', '#5eead4', '#99f6e4'];
@@ -20,20 +22,26 @@ export default function DashboardPage() {
   const [summary, setSummary] = useState(null);
   const [movements, setMovements] = useState([]);
   const [adjustments, setAdjustments] = useState([]);
+  const [goals, setGoals] = useState([]);
+  const [goalStats, setGoalStats] = useState(null);
+  const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchData = async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true);
-      const [sumRes, movRes, adjRes] = await Promise.all([
+      const [sumRes, movRes, adjRes, goalsRes] = await Promise.all([
         dashboardApi.getSummary(),
         stockApi.getMovements({ limit: 8 }),
         stockApi.getAdjustments({ status: 'pending', limit: 5 }),
+        goalsApi.getAll({ limit: 4 }),
       ]);
       setSummary(sumRes.data.data);
       setMovements(movRes.data.data || []);
       setAdjustments(adjRes.data.data || []);
+      setGoals(goalsRes.data.data || []);
+      setGoalStats(goalsRes.data.stats || null);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     } finally {
@@ -245,6 +253,113 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      {/* Active Dispatch Goals & Timeline Widget */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
+              <Target className="w-5 h-5 text-brand-700" />
+              Active Dispatch Goals & Deadlines
+            </h2>
+            {goalStats?.urgentAlerts > 0 && (
+              <span className="bg-red-100 text-red-700 text-xs font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                <Flame className="w-3 h-3 text-red-600" />
+                {goalStats.urgentAlerts} Urgent
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsAssignModalOpen(true)}
+              className="btn-primary btn-sm flex items-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Assign Goal</span>
+            </button>
+            <Link
+              href="/goals"
+              className="text-xs text-brand-700 font-semibold hover:underline flex items-center gap-1 ml-2"
+            >
+              <span>View All Timeline</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        </div>
+
+        {goals.length === 0 ? (
+          <div className="empty-state py-6">
+            <div className="empty-icon text-2xl">🎯</div>
+            <p className="text-gray-500 text-sm">No active dispatch goals</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {goals.map((g) => {
+              const isOverdue = g.isOverdue;
+              const isDueSoon = g.isDueSoon;
+              const isCompletedOrDispatched = ['dispatched', 'delivered', 'cancelled'].includes(g.status);
+
+              return (
+                <div
+                  key={g._id}
+                  className={`p-3.5 rounded-xl border transition-all ${
+                    isOverdue
+                      ? 'bg-red-50/70 border-red-200'
+                      : isDueSoon || g.priority === 'urgent'
+                      ? 'bg-amber-50/60 border-amber-200'
+                      : 'bg-gray-50 border-gray-100'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-bold text-sm text-gray-900 truncate">{g.title}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        Client: <strong>{g.customer?.name}</strong> · Qty:{' '}
+                        <strong>
+                          {g.quantity} {g.product?.unit || 'pcs'}
+                        </strong>
+                      </div>
+                    </div>
+                    <StatusBadge status={g.status} className="text-[10px]" />
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs mt-3 pt-2 border-t border-gray-200/50">
+                    <div className="flex items-center gap-1 text-gray-500">
+                      <Clock className="w-3.5 h-3.5" />
+                      {!isCompletedOrDispatched ? (
+                        isOverdue ? (
+                          <span className="text-red-600 font-bold">Overdue!</span>
+                        ) : isDueSoon ? (
+                          <span className="text-amber-700 font-bold">Due in {g.remainingHours}h</span>
+                        ) : (
+                          <span>Target: {formatDateTime(g.deadline)}</span>
+                        )
+                      ) : (
+                        <span className="text-emerald-700 font-medium capitalize">{g.status?.replace(/_/g, ' ')}</span>
+                      )}
+                    </div>
+
+                    <Link
+                      href="/goals"
+                      className="text-brand-700 font-semibold text-xs hover:underline flex items-center gap-0.5"
+                    >
+                      <span>Track</span>
+                      <ChevronRight className="w-3 h-3" />
+                    </Link>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <AssignGoalModal
+        isOpen={isAssignModalOpen}
+        onClose={() => setIsAssignModalOpen(false)}
+        onSuccess={() => fetchData(true)}
+      />
 
       {/* Recent movements table */}
       <div className="card">

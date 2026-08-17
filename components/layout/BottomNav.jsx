@@ -3,24 +3,24 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard, Package, UserCircle, BarChart2, MoreHorizontal,
-  Home, QrCode, Activity, User
+  Home, QrCode, Activity, User, Target
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import useAuthStore from '../../lib/authStore';
 
 const adminBottomNav = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/goals', label: 'Goals', icon: Target },
   { href: '/products', label: 'Inventory', icon: Package },
   { href: '/attendance', label: 'Attendance', icon: UserCircle },
-  { href: '/reports', label: 'Reports', icon: BarChart2 },
   { href: '/notifications', label: 'More', icon: MoreHorizontal },
 ];
 
 const workerBottomNav = [
   { href: '/worker', label: 'Home', icon: Home },
+  { href: '/goals', label: 'Goals', icon: Target },
   { href: '/worker/scan', label: 'Scan', icon: QrCode },
   { href: '/attendance', label: 'Attendance', icon: UserCircle },
-  { href: '/stock/movements', label: 'Activity', icon: Activity },
   { href: '/profile', label: 'Profile', icon: User },
 ];
 

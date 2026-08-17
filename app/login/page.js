@@ -39,7 +39,7 @@ export default function LoginPage() {
       if (serverMsg) {
         setError(serverMsg);
       } else if (err.code === 'ERR_NETWORK' || !err.response) {
-        setError('Cannot connect to backend server at http://localhost:5000. Please ensure "npm run dev" is running in /server.');
+        setError('Server Error');
       } else {
         setError(err.message || 'Login failed. Check credentials.');
       }
